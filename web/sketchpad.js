@@ -99,7 +99,7 @@ function installPad(node) {
   // Ctrl/Cmd + Z：仅当指针/焦点在画板区域内时接管为「画板撤销」，
   // 并阻止冒泡，避免与 ComfyUI 画布自身的撤销（图节点操作）冲突
   window.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z") && !e.shiftKey) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z") && !e.shiftKey && !e.repeat) {
       if (padHover || (document.activeElement && wrap.contains(document.activeElement))) {
         e.preventDefault();
         e.stopPropagation();
