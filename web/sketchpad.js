@@ -120,14 +120,36 @@ function installPad(node) {
       octx.clearRect(0, 0, overlay.width, overlay.height);
     }
     if (!lastPos) return;
+    const x = lastPos.x, y = lastPos.y;
+    // ① 笔刷大小环：双层描边（白底 + 黑线），任何背景都清晰可见
+    const r = Math.max(2, cursorSize() / 2);
+    octx.lineJoin = "round";
+    octx.lineWidth = 3;
+    octx.strokeStyle = "rgba(255,255,255,.9)";
+    octx.beginPath(); octx.arc(x, y, r, 0, Math.PI * 2); octx.stroke();
+    octx.lineWidth = 1.2;
+    octx.strokeStyle = "rgba(0,0,0,.85)";
+    octx.beginPath(); octx.arc(x, y, r, 0, Math.PI * 2); octx.stroke();
+    // ② 箭头光标：经典指针造型，尖端精确指向落笔点，白填充 + 黑描边，极易辨认
+    const a = 1.4; // 箭头缩放
     octx.beginPath();
-    octx.arc(lastPos.x, lastPos.y, Math.max(1.5, cursorSize() / 2), 0, Math.PI * 2);
-    octx.strokeStyle = "rgba(0,0,0,.65)";
-    octx.lineWidth = 1.5;
+    octx.moveTo(x + 2 * a, y + 2 * a);
+    octx.lineTo(x + 2 * a, y + 22 * a);
+    octx.lineTo(x + 8 * a, y + 16 * a);
+    octx.lineTo(x + 12 * a, y + 24 * a);
+    octx.lineTo(x + 15 * a, y + 23 * a);
+    octx.lineTo(x + 11 * a, y + 15 * a);
+    octx.lineTo(x + 20 * a, y + 15 * a);
+    octx.closePath();
+    octx.fillStyle = "rgba(255,255,255,.95)";
+    octx.fill();
+    octx.lineWidth = 1.4;
+    octx.strokeStyle = "rgba(0,0,0,.9)";
     octx.stroke();
+    // ③ 红色落笔点：强调精确位置（绘制时该点即为笔尖）
     octx.beginPath();
-    octx.arc(lastPos.x, lastPos.y, 1.5, 0, Math.PI * 2);
-    octx.fillStyle = "rgba(0,0,0,.7)";
+    octx.arc(x, y, 1.8, 0, Math.PI * 2);
+    octx.fillStyle = "#e23b3b";
     octx.fill();
   }
 
