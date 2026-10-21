@@ -19,6 +19,7 @@ function installPad(node) {
       <button data-act="eraser" title="擦除" style="cursor:pointer;padding:3px 8px;">🧽 擦除</button>
       <button data-act="pressure" title="画笔压力感应：开启后用数位笔/触控笔的轻重控制粗细（仅笔有效，鼠标不受影响）；关闭则始终用滑块固定粗细" style="cursor:pointer;padding:3px 8px;">💧 压感</button>
       <button data-act="line" title="直线模式：按住拖拽画出从起点到当前点的直线（实时预览），适合画直边、边框" style="cursor:pointer;padding:3px 8px;">📏 直线</button>
+      <button data-act="circle" title="圆形模式：按住拖拽，以起点为圆心画标准正圆（实时预览）；按住 Shift 拖出椭圆" style="cursor:pointer;padding:3px 8px;">⭕ 圆</button>
       <button data-act="smooth" title="手绘平滑：开启后用曲线拟合让手绘线条更圆顺；关闭则为生硬的逐点连线" style="cursor:pointer;padding:3px 8px;">✨ 平滑</button>
       <input type="color" class="color" value="#000000" title="画笔颜色"
              style="width:28px;height:26px;padding:0;border:1px solid #555;background:none;border-radius:4px;">
@@ -146,7 +147,7 @@ function installPad(node) {
     // 只管理「模式」按钮（画笔/擦除/直线），不触碰压感/平滑等独立开关，
     // 否则切换模式会把它们的选中高亮清掉。
     for (const b of wrap.querySelectorAll("button[data-act]")) {
-      if (b.dataset.act === "brush" || b.dataset.act === "eraser" || b.dataset.act === "line") {
+      if (b.dataset.act === "brush" || b.dataset.act === "eraser" || b.dataset.act === "line" || b.dataset.act === "circle") {
         const active = b.dataset.act === m;
         b.style.background = active ? "#4a6ea9" : "";
         b.style.color = active ? "#fff" : "";
@@ -295,6 +296,10 @@ function installPad(node) {
       lineStart = last;
       stampDot(last, effWidth(e));
       strokeBase = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    } else if (mode === "circle") {
+      // 圆形模式：起点为圆心，快照不含圆心点（最终图里不留圆心墨点）
+      lineStart = last;
+      strokeBase = ctx.getImageData(0, 0, canvas.width, canvas.height);
     } else {
       stampDot(last, effWidth(e));
     }
@@ -314,6 +319,19 @@ function installPad(node) {
       // 还原到起笔前，再画一条「起点 → 当前点」直线（实时橡皮筋预览）
       if (strokeBase) ctx.putImageData(strokeBase, 0, 0);
       strokeTo(lineStart, p, w);
+    } else if (mode === "circle") {
+      // 以起点为圆心画正圆；按住 Shift 变为椭圆（横纵半径独立跟随）
+      if (strokeBase) ctx.putImageData(strokeBase, 0, 0);
+      const dx = p.x - lineStart.x, dy = p.y - lineStart.y;
+      setStrokeStyle();
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      if (e.shiftKey) {
+        ctx.ellipse(lineStart.x, lineStart.y, Math.abs(dx), Math.abs(dy), 0, 0, Math.PI * 2);
+      } else {
+        ctx.arc(lineStart.x, lineStart.y, Math.hypot(dx, dy), 0, Math.PI * 2);
+      }
+      ctx.stroke();
     } else if (smoothOn) {
       // 手绘平滑：用中点二次曲线拟合，比逐点直线更圆顺
       const mid = { x: (last.x + p.x) / 2, y: (last.y + p.y) / 2 };
@@ -367,6 +385,7 @@ function installPad(node) {
       if (act === "brush") setMode("brush");
       else if (act === "eraser") setMode("eraser");
       else if (act === "line") setMode("line");
+      else if (act === "circle") setMode("circle");
       else if (act === "pressure") {
         pressureOn = !pressureOn;
         b.style.background = pressureOn ? "#4a6ea9" : "";
