@@ -9,6 +9,8 @@
 | ![瘦马草稿](examples/example-horse.png) | *古道西风瘦马*（Qwen Image 2.1 参考草稿生成） |
 | ![猫草稿](examples/example-cat.png) | *藏在柱子后面的黑猫* |
 | ![熊猫饭团草稿](examples/example-panda.png) | *熊猫饭团* |
+| ![长枪骑士](examples/example-knight.png) | *持长枪的红披风骑士*（歪歪扭扭的小人草稿 → 完整铠甲人像） |
+| ![猪八戒草稿](examples/example-pig.png) | *扛钉耙的猪八戒*（简笔小人 → 卡通成图，节点实拍） |
 
 节点与工作流实拍：![工作流示例](examples/example-workflow-lotus.png)
 
