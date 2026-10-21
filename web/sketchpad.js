@@ -19,8 +19,7 @@ function installPad(node) {
       <button data-act="eraser" title="擦除" style="cursor:pointer;padding:3px 8px;">🧽 擦除</button>
       <button data-act="pressure" title="画笔压力感应：开启后用数位笔/触控笔的轻重控制粗细（仅笔有效，鼠标不受影响）；关闭则始终用滑块固定粗细" style="cursor:pointer;padding:3px 8px;">💧 压感</button>
       <button data-act="line" title="直线模式：按住拖拽画出从起点到当前点的直线（实时预览），适合画直边、边框" style="cursor:pointer;padding:3px 8px;">📏 直线</button>
-      <button data-act="circle" title="圆形模式：按住拖拽，以起点为圆心画标准正圆（实时预览）；按住 Shift 拖出椭圆" style="cursor:pointer;padding:3px 8px;">⭕ 圆</button>
-      <button data-act="smooth" title="手绘平滑：开启后用曲线拟合让手绘线条更圆顺；关闭则为生硬的逐点连线" style="cursor:pointer;padding:3px 8px;">✨ 平滑</button>
+      <button data-act="autocircle" title="圆修正：随手圈一个近似闭合的圈，松手自动拟合为标准正圆；若画得不像圆则保留你的原手绘" style="cursor:pointer;padding:3px 8px;">🔄 圆修</button>
       <input type="color" class="color" value="#000000" title="画笔颜色"
              style="width:28px;height:26px;padding:0;border:1px solid #555;background:none;border-radius:4px;">
       <button data-act="undo" title="后退一步（最多 10 步）" style="cursor:pointer;padding:3px 8px;">↶ 后退</button>
@@ -139,15 +138,16 @@ function installPad(node) {
   let lineStart = null;   // 直线模式起点
   let strokeBase = null;  // 直线模式起笔前的画布快照（用于实时预览重绘）
   let pressureOn = false; // 画笔压力感应开关
-  let smoothOn = true;    // 手绘平滑开关（默认开）
   let padHover = false;   // 指针是否在画板区域内（用于 Ctrl+Z 判定）
+  let strokePts = [];     // 圆修模式记录的手绘点
+  let lastWidth = 1;      // 当前笔触宽度（用于圆修重绘）
 
   function setMode(m) {
     mode = m;
-    // 只管理「模式」按钮（画笔/擦除/直线），不触碰压感/平滑等独立开关，
+    // 只管理「模式」按钮（画笔/擦除/直线/圆修），不触碰压感等独立开关，
     // 否则切换模式会把它们的选中高亮清掉。
     for (const b of wrap.querySelectorAll("button[data-act]")) {
-      if (b.dataset.act === "brush" || b.dataset.act === "eraser" || b.dataset.act === "line" || b.dataset.act === "circle") {
+      if (b.dataset.act === "brush" || b.dataset.act === "eraser" || b.dataset.act === "line" || b.dataset.act === "autocircle") {
         const active = b.dataset.act === m;
         b.style.background = active ? "#4a6ea9" : "";
         b.style.color = active ? "#fff" : "";
@@ -213,6 +213,68 @@ function installPad(node) {
     ctx.beginPath();
     ctx.arc(p.x, p.y, Math.max(0.5, w / 2), 0, Math.PI * 2);
     ctx.fill();
+  }
+
+  // 最小二乘圆拟合（归一化 Kåsa 法，数值更稳定）：返回 {cx,cy,r} 或 null
+  function fitCircle(pts) {
+    const n = pts.length;
+    if (n < 6) return null;
+    let mx = 0, my = 0;
+    for (const p of pts) { mx += p.x; my += p.y; }
+    mx /= n; my /= n;
+    let mr = 0;
+    for (const p of pts) mr += Math.hypot(p.x - mx, p.y - my);
+    mr /= n;
+    if (!(mr > 0)) return null;
+    const X = [], Y = [];
+    for (const p of pts) { X.push((p.x - mx) / mr); Y.push((p.y - my) / mr); }
+    let Sz = 0, Szx = 0, Szy = 0, Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0;
+    for (let i = 0; i < n; i++) {
+      const x = X[i], y = Y[i], z = x * x + y * y;
+      Sz += z; Szx += z * x; Szy += z * y;
+      Sx += x; Sy += y; Sxx += x * x; Syy += y * y; Sxy += x * y;
+    }
+    // 解 [Sxx Sxy Sx; Sxy Syy Sy; Sx Sy n][D,E,F]^T = -[Szx,Szy,Sz]
+    const A = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, n]];
+    const rhs = [-Szx, -Szy, -Sz];
+    const sol = solve3(A, rhs);
+    if (!sol) return null;
+    const D = sol[0], E = sol[1], F = sol[2];
+    const disc = D * D + E * E - 4 * F;
+    if (!(disc > 0)) return null;
+    const cx = (-D / 2) * mr + mx;
+    const cy = (-E / 2) * mr + my;
+    const r = (Math.sqrt(disc) / 2) * mr;
+    if (!(r > 0)) return null;
+    return { cx, cy, r };
+  }
+  function det3(M) {
+    return M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1])
+         - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0])
+         + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+  }
+  function solve3(A, b) {
+    const d = det3(A);
+    if (Math.abs(d) < 1e-12) return null;
+    const col = (c) => A.map((row, i) => row.map((v, j) => (j === c ? b[i] : v)));
+    return [det3(col(0)) / d, det3(col(1)) / d, det3(col(2)) / d];
+  }
+  // 判断手绘轨迹是否够「圆」：半径离散度小 + 首尾基本闭合
+  function isCircleLike(fit, pts) {
+    const { cx, cy, r } = fit;
+    if (r < 4) return false;
+    let sum = 0, sum2 = 0;
+    for (const p of pts) {
+      const d = Math.hypot(p.x - cx, p.y - cy);
+      sum += d; sum2 += d * d;
+    }
+    const mean = sum / pts.length;
+    const variance = sum2 / pts.length - mean * mean;
+    const cv = Math.sqrt(Math.max(0, variance)) / mean; // 半径离散度
+    const start = pts[0], end = pts[pts.length - 1];
+    const gap = Math.hypot(start.x - end.x, start.y - end.y);
+    const closure = gap / (2 * Math.PI * r); // 缺口占周长比例
+    return cv < 0.16 && closure < 0.22;
   }
 
   function clearAll() {
@@ -296,9 +358,10 @@ function installPad(node) {
       lineStart = last;
       stampDot(last, effWidth(e));
       strokeBase = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    } else if (mode === "circle") {
-      // 圆形模式：起点为圆心，快照不含圆心点（最终图里不留圆心墨点）
+    } else if (mode === "autocircle") {
+      // 圆修模式：记录手绘点 + 起笔前快照；松手再决定拟合正圆或保留原画
       lineStart = last;
+      strokePts = [last];
       strokeBase = ctx.getImageData(0, 0, canvas.width, canvas.height);
     } else {
       stampDot(last, effWidth(e));
@@ -319,21 +382,13 @@ function installPad(node) {
       // 还原到起笔前，再画一条「起点 → 当前点」直线（实时橡皮筋预览）
       if (strokeBase) ctx.putImageData(strokeBase, 0, 0);
       strokeTo(lineStart, p, w);
-    } else if (mode === "circle") {
-      // 以起点为圆心画正圆；按住 Shift 变为椭圆（横纵半径独立跟随）
-      if (strokeBase) ctx.putImageData(strokeBase, 0, 0);
-      const dx = p.x - lineStart.x, dy = p.y - lineStart.y;
-      setStrokeStyle();
-      ctx.lineWidth = w;
-      ctx.beginPath();
-      if (e.shiftKey) {
-        ctx.ellipse(lineStart.x, lineStart.y, Math.abs(dx), Math.abs(dy), 0, 0, Math.PI * 2);
-      } else {
-        ctx.arc(lineStart.x, lineStart.y, Math.hypot(dx, dy), 0, Math.PI * 2);
-      }
-      ctx.stroke();
-    } else if (smoothOn) {
-      // 手绘平滑：用中点二次曲线拟合，比逐点直线更圆顺
+    } else if (mode === "autocircle") {
+      // 随手画，边画边记录点（松手时再拟合），并显示原手绘让用户看见
+      strokeTo(last, p, w);
+      strokePts.push(p);
+      lastWidth = w;
+    } else {
+      // 手绘平滑：用中点二次曲线拟合，线条天生圆顺（无开关，常开）
       const mid = { x: (last.x + p.x) / 2, y: (last.y + p.y) / 2 };
       setStrokeStyle();
       ctx.lineWidth = w;
@@ -342,8 +397,6 @@ function installPad(node) {
       ctx.quadraticCurveTo(last.x, last.y, mid.x, mid.y);
       ctx.stroke();
       lastMid = mid;
-    } else {
-      strokeTo(last, p, w);
     }
     last = p;
     pushThrottled();
@@ -351,7 +404,29 @@ function installPad(node) {
   const stop = () => {
     if (drawing) {
       drawing = false;
+      const base = strokeBase;
       strokeBase = null;
+      if (mode === "autocircle" && strokePts.length >= 6) {
+        const fit = fitCircle(strokePts);
+        if (fit && isCircleLike(fit, strokePts)) {
+          // 拟合成功 → 还原到起笔前，画标准正圆
+          if (base) ctx.putImageData(base, 0, 0);
+          setStrokeStyle();
+          ctx.lineWidth = lastWidth;
+          ctx.beginPath();
+          ctx.arc(fit.cx, fit.cy, fit.r, 0, Math.PI * 2);
+          ctx.stroke();
+        } else {
+          // 不像圆 → 原样重绘用户手绘，避免误删
+          setStrokeStyle();
+          ctx.lineWidth = lastWidth;
+          ctx.beginPath();
+          ctx.moveTo(strokePts[0].x, strokePts[0].y);
+          for (let i = 1; i < strokePts.length; i++) ctx.lineTo(strokePts[i].x, strokePts[i].y);
+          ctx.stroke();
+        }
+        strokePts = [];
+      }
       update();
     }
     if (panning) {
@@ -385,18 +460,12 @@ function installPad(node) {
       if (act === "brush") setMode("brush");
       else if (act === "eraser") setMode("eraser");
       else if (act === "line") setMode("line");
-      else if (act === "circle") setMode("circle");
+      else if (act === "autocircle") setMode("autocircle");
       else if (act === "pressure") {
         pressureOn = !pressureOn;
         b.style.background = pressureOn ? "#4a6ea9" : "";
         b.style.color = pressureOn ? "#fff" : "";
         b.style.borderColor = pressureOn ? "#6f8fc4" : "#555";
-      }
-      else if (act === "smooth") {
-        smoothOn = !smoothOn;
-        b.style.background = smoothOn ? "#4a6ea9" : "";
-        b.style.color = smoothOn ? "#fff" : "";
-        b.style.borderColor = smoothOn ? "#6f8fc4" : "#555";
       }
       else if (act === "undo") undo();
       else if (act === "pop") { if (floatWin) foldBack(); else popOut(); }
@@ -600,15 +669,6 @@ function installPad(node) {
   node.__sketchpad = { applySize, loadImage, update, clearAll };
 
   setMode("brush");
-  // 平滑默认开启，标记高亮
-  {
-    const sb = wrap.querySelector('button[data-act="smooth"]');
-    if (sb) {
-      sb.style.background = "#4a6ea9";
-      sb.style.color = "#fff";
-      sb.style.borderColor = "#6f8fc4";
-    }
-  }
   applySize();
 
   if (node.size && node.size[0] < 360) node.size = [360, 620];
