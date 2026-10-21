@@ -17,6 +17,9 @@ function installPad(node) {
     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:4px;">
       <button data-act="brush"  title="画笔" style="cursor:pointer;padding:3px 8px;">✏️ 画笔</button>
       <button data-act="eraser" title="擦除" style="cursor:pointer;padding:3px 8px;">🧽 擦除</button>
+      <button data-act="pressure" title="画笔压力感应：开启后用数位笔/触控笔的轻重控制粗细（仅笔有效，鼠标不受影响）；关闭则始终用滑块固定粗细" style="cursor:pointer;padding:3px 8px;">💧 压感</button>
+      <button data-act="line" title="直线模式：按住拖拽画出从起点到当前点的直线（实时预览），适合画直边、边框" style="cursor:pointer;padding:3px 8px;">📏 直线</button>
+      <button data-act="smooth" title="手绘平滑：开启后用曲线拟合让手绘线条更圆顺；关闭则为生硬的逐点连线" style="cursor:pointer;padding:3px 8px;">✨ 平滑</button>
       <input type="color" class="color" value="#000000" title="画笔颜色"
              style="width:28px;height:26px;padding:0;border:1px solid #555;background:none;border-radius:4px;">
       <button data-act="undo" title="后退一步（最多 10 步）" style="cursor:pointer;padding:3px 8px;">↶ 后退</button>
@@ -120,14 +123,23 @@ function installPad(node) {
   let mode = "brush";
   let drawing = false;
   let last = null;
+  let lastMid = null;     // 平滑曲线用：上一段的中点
+  let lineStart = null;   // 直线模式起点
+  let strokeBase = null;  // 直线模式起笔前的画布快照（用于实时预览重绘）
+  let pressureOn = false; // 画笔压力感应开关
+  let smoothOn = true;    // 手绘平滑开关（默认开）
 
   function setMode(m) {
     mode = m;
+    // 只管理「模式」按钮（画笔/擦除/直线），不触碰压感/平滑等独立开关，
+    // 否则切换模式会把它们的选中高亮清掉。
     for (const b of wrap.querySelectorAll("button[data-act]")) {
-      const active = b.dataset.act === m;
-      b.style.background = active ? "#4a6ea9" : "";
-      b.style.color = active ? "#fff" : "";
-      b.style.borderColor = active ? "#6f8fc4" : "#555";
+      if (b.dataset.act === "brush" || b.dataset.act === "eraser" || b.dataset.act === "line") {
+        const active = b.dataset.act === m;
+        b.style.background = active ? "#4a6ea9" : "";
+        b.style.color = active ? "#fff" : "";
+        b.style.borderColor = active ? "#6f8fc4" : "#555";
+      }
     }
   }
 
@@ -156,17 +168,38 @@ function installPad(node) {
     };
   }
 
-  function strokeTo(p0, p1) {
-    ctx.save();
+  // 实际线宽：开启压感且为数位笔时，按笔压在滑块基准上下浮动；其余情况用滑块固定值
+  function effWidth(e) {
+    const base = mode === "eraser" ? +eraserRange.value : +brushRange.value;
+    if (!pressureOn || !e || e.pointerType !== "pen") return base;
+    const p = (typeof e.pressure === "number" && e.pressure > 0) ? e.pressure : 0.5;
+    // 0.5 ≈ 基准粗细；轻压更细、重压更粗
+    return Math.max(0.5, base * (0.25 + 1.5 * p));
+  }
+
+  function setStrokeStyle() {
     ctx.strokeStyle = mode === "eraser" ? "#ffffff" : colorInput.value;
-    ctx.lineWidth = mode === "eraser" ? +eraserRange.value : +brushRange.value;
+    ctx.fillStyle = ctx.strokeStyle;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
+  }
+
+  // 绘制一段固定粗细的线段（无平滑）
+  function strokeTo(p0, p1, w) {
+    setStrokeStyle();
+    ctx.lineWidth = w;
     ctx.beginPath();
     ctx.moveTo(p0.x, p0.y);
     ctx.lineTo(p1.x, p1.y);
     ctx.stroke();
-    ctx.restore();
+  }
+
+  // 在 p 点盖一个圆点：保证落笔起点 / 单击成点，在任意粗细下都有清晰起笔
+  function stampDot(p, w) {
+    setStrokeStyle();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, Math.max(0.5, w / 2), 0, Math.PI * 2);
+    ctx.fill();
   }
 
   function clearAll() {
@@ -244,7 +277,15 @@ function installPad(node) {
     drawing = true;
     pushHistory();
     last = pt(e);
-    strokeTo(last, last);
+    lastMid = { x: last.x, y: last.y };
+    if (mode === "line") {
+      // 直线模式：记下起点，先盖起点圆点，再拍一张起笔前快照用于实时重绘预览
+      lineStart = last;
+      stampDot(last, effWidth(e));
+      strokeBase = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    } else {
+      stampDot(last, effWidth(e));
+    }
     pushThrottled();
   });
   canvas.addEventListener("pointermove", (e) => {
@@ -256,13 +297,31 @@ function installPad(node) {
     }
     if (!drawing) return;
     const p = pt(e);
-    strokeTo(last, p);
+    const w = effWidth(e);
+    if (mode === "line") {
+      // 还原到起笔前，再画一条「起点 → 当前点」直线（实时橡皮筋预览）
+      if (strokeBase) ctx.putImageData(strokeBase, 0, 0);
+      strokeTo(lineStart, p, w);
+    } else if (smoothOn) {
+      // 手绘平滑：用中点二次曲线拟合，比逐点直线更圆顺
+      const mid = { x: (last.x + p.x) / 2, y: (last.y + p.y) / 2 };
+      setStrokeStyle();
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.moveTo(lastMid.x, lastMid.y);
+      ctx.quadraticCurveTo(last.x, last.y, mid.x, mid.y);
+      ctx.stroke();
+      lastMid = mid;
+    } else {
+      strokeTo(last, p, w);
+    }
     last = p;
     pushThrottled();
   });
   const stop = () => {
     if (drawing) {
       drawing = false;
+      strokeBase = null;
       update();
     }
     if (panning) {
@@ -292,6 +351,19 @@ function installPad(node) {
       const act = b.dataset.act;
       if (act === "brush") setMode("brush");
       else if (act === "eraser") setMode("eraser");
+      else if (act === "line") setMode("line");
+      else if (act === "pressure") {
+        pressureOn = !pressureOn;
+        b.style.background = pressureOn ? "#4a6ea9" : "";
+        b.style.color = pressureOn ? "#fff" : "";
+        b.style.borderColor = pressureOn ? "#6f8fc4" : "#555";
+      }
+      else if (act === "smooth") {
+        smoothOn = !smoothOn;
+        b.style.background = smoothOn ? "#4a6ea9" : "";
+        b.style.color = smoothOn ? "#fff" : "";
+        b.style.borderColor = smoothOn ? "#6f8fc4" : "#555";
+      }
       else if (act === "undo") undo();
       else if (act === "pop") { if (floatWin) foldBack(); else popOut(); }
       else if (act === "sync") {
@@ -494,6 +566,15 @@ function installPad(node) {
   node.__sketchpad = { applySize, loadImage, update, clearAll };
 
   setMode("brush");
+  // 平滑默认开启，标记高亮
+  {
+    const sb = wrap.querySelector('button[data-act="smooth"]');
+    if (sb) {
+      sb.style.background = "#4a6ea9";
+      sb.style.color = "#fff";
+      sb.style.borderColor = "#6f8fc4";
+    }
+  }
   applySize();
 
   if (node.size && node.size[0] < 360) node.size = [360, 620];
