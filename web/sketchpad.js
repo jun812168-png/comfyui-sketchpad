@@ -11,7 +11,8 @@ function installPad(node) {
 
   const wrap = document.createElement("div");
   wrap.style.cssText =
-    "width:100%;box-sizing:border-box;padding:4px;color:#ccc;font-size:12px;user-select:none;";
+    "width:100%;box-sizing:border-box;padding:4px;color:#ccc;font-size:12px;user-select:none;outline:none;";
+  wrap.tabIndex = 0; // 让画板容器可聚焦：Ctrl+Z 仅在该焦点内接管，避免逃逸到 ComfyUI 画布撤销
 
   wrap.innerHTML = `
     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:4px;">
@@ -99,12 +100,14 @@ function installPad(node) {
   // Ctrl/Cmd + Z：仅当指针/焦点在画板区域内时接管为「画板撤销」，
   // 并阻止冒泡，避免与 ComfyUI 画布自身的撤销（图节点操作）冲突
   window.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z") && !e.shiftKey && !e.repeat) {
-      if (padHover || (document.activeElement && wrap.contains(document.activeElement))) {
-        e.preventDefault();
-        e.stopPropagation();
-        undo();
-      }
+    if (e.isComposing) return; // 输入法组合输入期间不处理快捷键，避免误触发
+    // 仅当键盘焦点位于画板内（wrap 及其子元素），或指针悬停于画板时，
+    // Ctrl/Cmd+Z 才接管为「画板撤销」；否则不拦截，让 ComfyUI 自身的撤销正常工作
+    const inPad = padHover || (document.activeElement && wrap.contains(document.activeElement));
+    if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z") && !e.shiftKey && !e.repeat && inPad) {
+      e.preventDefault();
+      e.stopPropagation();
+      undo();
     }
   });
 
@@ -376,6 +379,7 @@ function installPad(node) {
   // 事件
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    wrap.focus({ preventScroll: true }); // 落笔即锁定键盘焦点到画板，保证之后 Ctrl+Z 接管画板而非 ComfyUI
     canvas.setPointerCapture(e.pointerId);
     // 平移模式：中键拖动，或按住空格 + 左键拖动（不触发绘制）
     if (e.button === 1 || (spaceHeld && e.button === 0)) {
