@@ -96,6 +96,17 @@ function installPad(node) {
       if (!panning) canvas.style.cursor = "none";
     }
   });
+  // Ctrl/Cmd + Z：仅当指针/焦点在画板区域内时接管为「画板撤销」，
+  // 并阻止冒泡，避免与 ComfyUI 画布自身的撤销（图节点操作）冲突
+  window.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z") && !e.shiftKey) {
+      if (padHover || (document.activeElement && wrap.contains(document.activeElement))) {
+        e.preventDefault();
+        e.stopPropagation();
+        undo();
+      }
+    }
+  });
 
   let lastPos = null; // 画布坐标系下的鼠标位置
   function cursorSize() {
@@ -128,6 +139,7 @@ function installPad(node) {
   let strokeBase = null;  // 直线模式起笔前的画布快照（用于实时预览重绘）
   let pressureOn = false; // 画笔压力感应开关
   let smoothOn = true;    // 手绘平滑开关（默认开）
+  let padHover = false;   // 指针是否在画板区域内（用于 Ctrl+Z 判定）
 
   function setMode(m) {
     mode = m;
@@ -345,6 +357,9 @@ function installPad(node) {
     lastPos = null;
     refreshCursor();
   });
+  // 画板区域（含工具栏+画布）进入/离开：用于 Ctrl+Z 只在画板上生效
+  wrap.addEventListener("pointerenter", () => { padHover = true; });
+  wrap.addEventListener("pointerleave", () => { padHover = false; });
 
   for (const b of wrap.querySelectorAll("button[data-act]")) {
     b.addEventListener("click", () => {
