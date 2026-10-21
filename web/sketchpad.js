@@ -19,7 +19,7 @@ function installPad(node) {
       <button data-act="eraser" title="擦除" style="cursor:pointer;padding:3px 8px;">🧽 擦除</button>
       <button data-act="pressure" title="画笔压力感应：开启后用数位笔/触控笔的轻重控制粗细（仅笔有效，鼠标不受影响）；关闭则始终用滑块固定粗细" style="cursor:pointer;padding:3px 8px;">💧 压感</button>
       <button data-act="line" title="直线模式：按住拖拽画出从起点到当前点的直线（实时预览），适合画直边、边框" style="cursor:pointer;padding:3px 8px;">📏 直线</button>
-      <button data-act="autocircle" title="圆修正：随手圈一个近似闭合的圈，松手自动拟合为标准正圆；若画得不像圆则保留你的原手绘" style="cursor:pointer;padding:3px 8px;">🔄 圆修</button>
+      <button data-act="autocircle" title="椭圆修正：随手圈一个近似闭合的圈，松手自动拟合为平滑的标准椭圆（画鸡蛋/椭圆就修成椭圆，正圆只是椭圆的特例）；若画得不像椭圆则保留你的原手绘" style="cursor:pointer;padding:3px 8px;">🔄 椭圆</button>
       <input type="color" class="color" value="#000000" title="画笔颜色"
              style="width:28px;height:26px;padding:0;border:1px solid #555;background:none;border-radius:4px;">
       <button data-act="undo" title="后退一步（最多 10 步）" style="cursor:pointer;padding:3px 8px;">↶ 后退</button>
@@ -215,66 +215,64 @@ function installPad(node) {
     ctx.fill();
   }
 
-  // 最小二乘圆拟合（归一化 Kåsa 法，数值更稳定）：返回 {cx,cy,r} 或 null
-  function fitCircle(pts) {
+  // 椭圆拟合：以质心为中心，沿主成分（2x2 特征分解）方向取最大展宽为半轴，
+  // 得到平滑的标准椭圆。返回 {cx,cy,a,b,theta}（a=长半轴, b=短半轴, theta=长轴弧度）或 null
+  function fitEllipse(pts) {
     const n = pts.length;
-    if (n < 6) return null;
-    let mx = 0, my = 0;
-    for (const p of pts) { mx += p.x; my += p.y; }
-    mx /= n; my /= n;
-    let mr = 0;
-    for (const p of pts) mr += Math.hypot(p.x - mx, p.y - my);
-    mr /= n;
-    if (!(mr > 0)) return null;
-    const X = [], Y = [];
-    for (const p of pts) { X.push((p.x - mx) / mr); Y.push((p.y - my) / mr); }
-    let Sz = 0, Szx = 0, Szy = 0, Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0;
-    for (let i = 0; i < n; i++) {
-      const x = X[i], y = Y[i], z = x * x + y * y;
-      Sz += z; Szx += z * x; Szy += z * y;
-      Sx += x; Sy += y; Sxx += x * x; Syy += y * y; Sxy += x * y;
+    if (n < 8) return null;
+    let cx = 0, cy = 0;
+    for (const p of pts) { cx += p.x; cy += p.y; }
+    cx /= n; cy /= n;
+    // 协方差矩阵 → 主轴方向
+    let sxx = 0, sxy = 0, syy = 0;
+    for (const p of pts) {
+      const dx = p.x - cx, dy = p.y - cy;
+      sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
     }
-    // 解 [Sxx Sxy Sx; Sxy Syy Sy; Sx Sy n][D,E,F]^T = -[Szx,Szy,Sz]
-    const A = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, n]];
-    const rhs = [-Szx, -Szy, -Sz];
-    const sol = solve3(A, rhs);
-    if (!sol) return null;
-    const D = sol[0], E = sol[1], F = sol[2];
-    const disc = D * D + E * E - 4 * F;
-    if (!(disc > 0)) return null;
-    const cx = (-D / 2) * mr + mx;
-    const cy = (-E / 2) * mr + my;
-    const r = (Math.sqrt(disc) / 2) * mr;
-    if (!(r > 0)) return null;
-    return { cx, cy, r };
+    const tr = sxx + syy, det = sxx * syy - sxy * sxy;
+    const disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+    if (!(tr > 0)) return null;
+    let theta;
+    if (Math.abs(sxy) > 1e-9) theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    else theta = (sxx >= syy) ? 0 : Math.PI / 2;
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    // 沿主轴/副轴的最大展宽作为半轴长度（椭圆恰好包住手绘外缘，轮廓平滑）
+    let maxU = 0, maxV = 0;
+    for (const p of pts) {
+      const dx = p.x - cx, dy = p.y - cy;
+      const u = dx * cos + dy * sin;
+      const v = -dx * sin + dy * cos;
+      if (Math.abs(u) > maxU) maxU = Math.abs(u);
+      if (Math.abs(v) > maxV) maxV = Math.abs(v);
+    }
+    const a = Math.max(maxU, 4); // 长半轴
+    const b = Math.max(maxV, 2); // 短半轴
+    if (!(a > 0 && b > 0)) return null;
+    return { cx, cy, a, b, theta };
   }
-  function det3(M) {
-    return M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1])
-         - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0])
-         + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
-  }
-  function solve3(A, b) {
-    const d = det3(A);
-    if (Math.abs(d) < 1e-12) return null;
-    const col = (c) => A.map((row, i) => row.map((v, j) => (j === c ? b[i] : v)));
-    return [det3(col(0)) / d, det3(col(1)) / d, det3(col(2)) / d];
-  }
-  // 判断手绘轨迹是否够「圆」：半径离散度小 + 首尾基本闭合
-  function isCircleLike(fit, pts) {
-    const { cx, cy, r } = fit;
-    if (r < 4) return false;
+  // 判断手绘轨迹是否够「椭圆」：整体呈闭合环 + 各点到拟合椭圆的归一化半径离散度小
+  function isEllipseLike(fit, pts) {
+    const { cx, cy, a, b, theta } = fit;
+    if (b / a < 0.12) return false; // 太扁，更像一条曲线而非椭圆
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    // 首尾闭合度
+    const start = pts[0], end = pts[pts.length - 1];
+    const gap = Math.hypot(start.x - end.x, start.y - end.y);
+    const perimeter = Math.PI * Math.sqrt(2 * (a * a + b * b)); // 椭圆周长近似
+    const closure = gap / perimeter;
+    if (closure > 0.32) return false; // 缺口过大，不像闭合环
+    // 归一化半径 (u/a)^2+(v/b)^2，椭圆上应≈1；离散度大说明形状不规则
     let sum = 0, sum2 = 0;
     for (const p of pts) {
-      const d = Math.hypot(p.x - cx, p.y - cy);
-      sum += d; sum2 += d * d;
+      const dx = p.x - cx, dy = p.y - cy;
+      const u = dx * cos + dy * sin, v = -dx * sin + dy * cos;
+      const val = (u / a) * (u / a) + (v / b) * (v / b);
+      sum += val; sum2 += val * val;
     }
     const mean = sum / pts.length;
     const variance = sum2 / pts.length - mean * mean;
-    const cv = Math.sqrt(Math.max(0, variance)) / mean; // 半径离散度
-    const start = pts[0], end = pts[pts.length - 1];
-    const gap = Math.hypot(start.x - end.x, start.y - end.y);
-    const closure = gap / (2 * Math.PI * r); // 缺口占周长比例
-    return cv < 0.16 && closure < 0.22;
+    const cv = Math.sqrt(Math.max(0, variance)) / mean;
+    return cv < 0.42;
   }
 
   function clearAll() {
@@ -359,7 +357,7 @@ function installPad(node) {
       stampDot(last, effWidth(e));
       strokeBase = ctx.getImageData(0, 0, canvas.width, canvas.height);
     } else if (mode === "autocircle") {
-      // 圆修模式：记录手绘点 + 起笔前快照；松手再决定拟合正圆或保留原画
+      // 椭圆修正模式：记录手绘点 + 起笔前快照；松手再决定拟合椭圆或保留原画
       lineStart = last;
       strokePts = [last];
       strokeBase = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -406,18 +404,18 @@ function installPad(node) {
       drawing = false;
       const base = strokeBase;
       strokeBase = null;
-      if (mode === "autocircle" && strokePts.length >= 6) {
-        const fit = fitCircle(strokePts);
-        if (fit && isCircleLike(fit, strokePts)) {
-          // 拟合成功 → 还原到起笔前，画标准正圆
+      if (mode === "autocircle" && strokePts.length >= 8) {
+        const fit = fitEllipse(strokePts);
+        if (fit && isEllipseLike(fit, strokePts)) {
+          // 拟合成功 → 还原到起笔前，画平滑标准椭圆（正圆只是 a≈b 的特例）
           if (base) ctx.putImageData(base, 0, 0);
           setStrokeStyle();
           ctx.lineWidth = lastWidth;
           ctx.beginPath();
-          ctx.arc(fit.cx, fit.cy, fit.r, 0, Math.PI * 2);
+          ctx.ellipse(fit.cx, fit.cy, fit.a, fit.b, fit.theta, 0, Math.PI * 2);
           ctx.stroke();
         } else {
-          // 不像圆 → 原样重绘用户手绘，避免误删
+          // 不像椭圆 → 原样重绘用户手绘，避免误删
           setStrokeStyle();
           ctx.lineWidth = lastWidth;
           ctx.beginPath();
