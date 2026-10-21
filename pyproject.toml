@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-sketchpad"
+description = "Hand-draw sketches with brush/eraser inside a ComfyUI node and output them as an IMAGE reference (with undo, resolution sync, pop-out window, wheel zoom)."
+version = "1.0.0"
+license = { text = "MIT" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Jun812168-PNG/comfyui-sketchpad"
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "Sketchpad 画板"
+Icon = ""
