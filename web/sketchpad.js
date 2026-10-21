@@ -19,7 +19,7 @@ function installPad(node) {
       <button data-act="eraser" title="擦除" style="cursor:pointer;padding:3px 8px;">🧽 擦除</button>
       <button data-act="pressure" title="画笔压力感应：开启后用数位笔/触控笔的轻重控制粗细（仅笔有效，鼠标不受影响）；关闭则始终用滑块固定粗细" style="cursor:pointer;padding:3px 8px;">💧 压感</button>
       <button data-act="line" title="直线模式：按住拖拽画出从起点到当前点的直线（实时预览），适合画直边、边框" style="cursor:pointer;padding:3px 8px;">📏 直线</button>
-      <button data-act="autocircle" title="椭圆修正：随手圈一个近似闭合的圈，松手自动拟合为平滑的标准椭圆（画鸡蛋/椭圆就修成椭圆，正圆只是椭圆的特例）；若画得不像椭圆则保留你的原手绘" style="cursor:pointer;padding:3px 8px;">🔄 椭圆</button>
+      <button data-act="autocircle" title="智能修形：随手圈一个闭合的圈，松手自动平滑——完全自动，无需区分圆/椭圆：画得圆自然修成圆，鸡蛋保留鸡蛋轮廓，只抹平手绘抖动；不像闭合环则原样保留" style="cursor:pointer;padding:3px 8px;">🔄 修形</button>
       <input type="color" class="color" value="#000000" title="画笔颜色"
              style="width:28px;height:26px;padding:0;border:1px solid #555;background:none;border-radius:4px;">
       <button data-act="undo" title="后退一步（最多 10 步）" style="cursor:pointer;padding:3px 8px;">↶ 后退</button>
@@ -215,64 +215,79 @@ function installPad(node) {
     ctx.fill();
   }
 
-  // 椭圆拟合：以质心为中心，沿主成分（2x2 特征分解）方向取最大展宽为半轴，
-  // 得到平滑的标准椭圆。返回 {cx,cy,a,b,theta}（a=长半轴, b=短半轴, theta=长轴弧度）或 null
-  function fitEllipse(pts) {
-    const n = pts.length;
-    if (n < 8) return null;
-    let cx = 0, cy = 0;
-    for (const p of pts) { cx += p.x; cy += p.y; }
-    cx /= n; cy /= n;
-    // 协方差矩阵 → 主轴方向
-    let sxx = 0, sxy = 0, syy = 0;
-    for (const p of pts) {
-      const dx = p.x - cx, dy = p.y - cy;
-      sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+  // —— 智能修形：傅里叶轮廓平滑 ——
+  // 原理：闭合手绘轮廓视为复数序列 x+iy，做离散傅里叶变换后只保留前 K 阶谐波再重建。
+  // 低频谐波承载整体形状（圆就是圆、鸡蛋的不对称轮廓也保留），高频是手绘抖动，直接滤掉。
+  // 完全自动：不需要区分"椭圆/正圆"，画什么形状就平滑成什么形状。
+
+  // 首尾缺口占周长比例（判断是否算闭合环）
+  function loopGapRatio(pts) {
+    let per = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i], q = pts[(i + 1) % pts.length];
+      per += Math.hypot(q.x - p.x, q.y - p.y);
     }
-    const tr = sxx + syy, det = sxx * syy - sxy * sxy;
-    const disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
-    if (!(tr > 0)) return null;
-    let theta;
-    if (Math.abs(sxy) > 1e-9) theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
-    else theta = (sxx >= syy) ? 0 : Math.PI / 2;
-    const cos = Math.cos(theta), sin = Math.sin(theta);
-    // 沿主轴/副轴的最大展宽作为半轴长度（椭圆恰好包住手绘外缘，轮廓平滑）
-    let maxU = 0, maxV = 0;
-    for (const p of pts) {
-      const dx = p.x - cx, dy = p.y - cy;
-      const u = dx * cos + dy * sin;
-      const v = -dx * sin + dy * cos;
-      if (Math.abs(u) > maxU) maxU = Math.abs(u);
-      if (Math.abs(v) > maxV) maxV = Math.abs(v);
-    }
-    const a = Math.max(maxU, 4); // 长半轴
-    const b = Math.max(maxV, 2); // 短半轴
-    if (!(a > 0 && b > 0)) return null;
-    return { cx, cy, a, b, theta };
+    if (!(per > 0)) return 1;
+    const gap = Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y);
+    return gap / per;
   }
-  // 判断手绘轨迹是否够「椭圆」：整体呈闭合环 + 各点到拟合椭圆的归一化半径离散度小
-  function isEllipseLike(fit, pts) {
-    const { cx, cy, a, b, theta } = fit;
-    if (b / a < 0.12) return false; // 太扁，更像一条曲线而非椭圆
-    const cos = Math.cos(theta), sin = Math.sin(theta);
-    // 首尾闭合度
-    const start = pts[0], end = pts[pts.length - 1];
-    const gap = Math.hypot(start.x - end.x, start.y - end.y);
-    const perimeter = Math.PI * Math.sqrt(2 * (a * a + b * b)); // 椭圆周长近似
-    const closure = gap / perimeter;
-    if (closure > 0.32) return false; // 缺口过大，不像闭合环
-    // 归一化半径 (u/a)^2+(v/b)^2，椭圆上应≈1；离散度大说明形状不规则
-    let sum = 0, sum2 = 0;
-    for (const p of pts) {
-      const dx = p.x - cx, dy = p.y - cy;
-      const u = dx * cos + dy * sin, v = -dx * sin + dy * cos;
-      const val = (u / a) * (u / a) + (v / b) * (v / b);
-      sum += val; sum2 += val * val;
+
+  // 按弧长均匀重采样闭合轮廓为 N 个点
+  function resampleClosed(raw, N) {
+    const n = raw.length;
+    if (n < 8) return null;
+    const cum = [0];
+    for (let i = 1; i <= n; i++) {
+      const p = raw[i - 1], q = raw[i % n];
+      cum.push(cum[i - 1] + Math.hypot(q.x - p.x, q.y - p.y));
     }
-    const mean = sum / pts.length;
-    const variance = sum2 / pts.length - mean * mean;
-    const cv = Math.sqrt(Math.max(0, variance)) / mean;
-    return cv < 0.42;
+    const total = cum[n];
+    if (!(total > 0)) return null;
+    const out = [];
+    let j = 0;
+    for (let k = 0; k < N; k++) {
+      const target = (total * k) / N;
+      while (j < n - 1 && cum[j + 1] < target) j++;
+      const p = raw[j], q = raw[(j + 1) % n];
+      const seg = cum[j + 1] - cum[j];
+      const t = seg > 0 ? (target - cum[j]) / seg : 0;
+      out.push({ x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t });
+    }
+    return out;
+  }
+
+  // 傅里叶平滑：保留前 K 阶谐波，返回 N 个平滑点（自动闭合、保持鸡蛋等整体形状）
+  function fourierSmoothClosed(raw, K) {
+    const N = 128;
+    const s = resampleClosed(raw, N);
+    if (!s) return null;
+    const Kmax = Math.max(1, Math.min(K, Math.floor(N / 2) - 1));
+    // 计算谐波系数 c_m = (1/N) Σ z_n · e^{-i2πmn/N}
+    const cs = [];
+    for (let m = -Kmax; m <= Kmax; m++) {
+      let cx = 0, cy = 0;
+      for (let n = 0; n < N; n++) {
+        const ang = (-2 * Math.PI * m * n) / N;
+        const w = s[n];
+        cx += w.x * Math.cos(ang) - w.y * Math.sin(ang);
+        cy += w.x * Math.sin(ang) + w.y * Math.cos(ang);
+      }
+      cs.push({ cx: cx / N, cy: cy / N });
+    }
+    // 重建平滑轮廓
+    const out = [];
+    for (let n = 0; n < N; n++) {
+      let x = 0, y = 0;
+      let i = 0;
+      for (let m = -Kmax; m <= Kmax; m++, i++) {
+        const ang = (2 * Math.PI * m * n) / N;
+        const c = cs[i];
+        x += c.cx * Math.cos(ang) - c.cy * Math.sin(ang);
+        y += c.cx * Math.sin(ang) + c.cy * Math.cos(ang);
+      }
+      out.push({ x, y });
+    }
+    return out;
   }
 
   function clearAll() {
@@ -405,17 +420,20 @@ function installPad(node) {
       const base = strokeBase;
       strokeBase = null;
       if (mode === "autocircle" && strokePts.length >= 8) {
-        const fit = fitEllipse(strokePts);
-        if (fit && isEllipseLike(fit, strokePts)) {
-          // 拟合成功 → 还原到起笔前，画平滑标准椭圆（正圆只是 a≈b 的特例）
+        const sm = fourierSmoothClosed(strokePts, 6);
+        if (sm && loopGapRatio(strokePts) < 0.35) {
+          // 闭合环 → 还原到起笔前，画傅里叶平滑轮廓：
+          // 圆就是圆、鸡蛋保留鸡蛋形状，只去掉高频手绘抖动（全自动，无需区分）
           if (base) ctx.putImageData(base, 0, 0);
           setStrokeStyle();
           ctx.lineWidth = lastWidth;
           ctx.beginPath();
-          ctx.ellipse(fit.cx, fit.cy, fit.a, fit.b, fit.theta, 0, Math.PI * 2);
+          ctx.moveTo(sm[0].x, sm[0].y);
+          for (let i = 1; i < sm.length; i++) ctx.lineTo(sm[i].x, sm[i].y);
+          ctx.closePath();
           ctx.stroke();
         } else {
-          // 不像椭圆 → 原样重绘用户手绘，避免误删
+          // 不像闭合环 → 原样重绘用户手绘，避免误删
           setStrokeStyle();
           ctx.lineWidth = lastWidth;
           ctx.beginPath();
